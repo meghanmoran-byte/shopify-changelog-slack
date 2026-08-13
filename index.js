@@ -1,13 +1,13 @@
 import Parser from "rss-parser";
 import * as cheerio from "cheerio";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const SLACK_CHANNEL_NAME = process.env.SLACK_CHANNEL_NAME || "shopify updates"; // just for the message header
 
 if (!SLACK_WEBHOOK_URL) throw new Error("Missing SLACK_WEBHOOK_URL env var");
-if (!ANTHROPIC_API_KEY) throw new Error("Missing ANTHROPIC_API_KEY env var");
+if (!OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY env var");
 
 const CHANGELOG_URL = "https://changelog.shopify.com/";
 const FEED_URL = "https://changelog.shopify.com/feed.xml";
@@ -30,7 +30,6 @@ async function fetchViaFeed() {
       title: item.title?.trim() || "Untitled update",
       link: item.link || CHANGELOG_URL,
       date: item.isoDate ? new Date(item.isoDate).toISOString().slice(0, 10) : "unknown date",
-      // contentSnippet is plain text, content may include HTML
       body: (item.contentSnippet || item.content || "").trim(),
     }));
   return items;
@@ -38,9 +37,6 @@ async function fetchViaFeed() {
 
 /**
  * Attempt 2 (fallback): scrape the HTML changelog page directly.
- * NOTE: This is the part most likely to need adjusting if Shopify changes
- * their markup. Inspect the page and update the selectors below if this
- * fallback ever returns zero items.
  */
 async function fetchViaScrape() {
   const res = await fetch(CHANGELOG_URL, {
@@ -51,8 +47,6 @@ async function fetchViaScrape() {
   const $ = cheerio.load(html);
 
   const items = [];
-  // Common pattern for changelog/blog-style sites: repeated <article> blocks.
-  // Adjust this selector based on the actual page structure if needed.
   $("article").each((_, el) => {
     const title = $(el).find("h1, h2, h3").first().text().trim();
     const link = $(el).find("a").first().attr("href");
@@ -85,19 +79,19 @@ async function fetchRecentUpdates() {
   return fetchViaScrape();
 }
 
-async function summarizeWithClaude(items) {
+async function summarizeWithOpenAI(items) {
   if (items.length === 0) {
     return "No new Shopify changelog updates were found in the last month.";
   }
 
-  const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+  const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
   const rawList = items
     .map((item, i) => `${i + 1}. [${item.date}] ${item.title}\n${item.body}\nLink: ${item.link}`)
     .join("\n\n");
 
-  const msg = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
     max_tokens: 1200,
     messages: [
       {
@@ -118,8 +112,7 @@ ${rawList}`,
     ],
   });
 
-  const textBlock = msg.content.find((b) => b.type === "text");
-  return textBlock ? textBlock.text : "Could not generate summary.";
+  return completion.choices[0]?.message?.content || "Could not generate summary.";
 }
 
 async function postToSlack(text) {
@@ -139,8 +132,8 @@ async function main() {
   const items = await fetchRecentUpdates();
   console.log(`Found ${items.length} update(s) in the last month.`);
 
-  console.log("Summarizing with Claude...");
-  const summary = await summarizeWithClaude(items);
+  console.log("Summarizing with OpenAI...");
+  const summary = await summarizeWithOpenAI(items);
 
   console.log("Posting to Slack...");
   await postToSlack(summary);
